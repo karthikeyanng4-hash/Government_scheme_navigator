@@ -10,6 +10,7 @@ import Dashboard from './pages/Dashboard';
 import Schemes from './pages/Schemes';
 import Eligibility from './pages/Eligibility';
 import AiAssistantPage from './pages/AiAssistantPage';
+import About from './pages/About';
 
 const ScrollToTop = () => {
   const { pathname } = useLocation();
@@ -17,6 +18,32 @@ const ScrollToTop = () => {
     window.scrollTo(0, 0);
   }, [pathname]);
   return null;
+};
+
+const AppContent = () => {
+  const location = useLocation();
+  const isAssistantPage = location.pathname === '/assistant';
+
+  return (
+    <div className="min-h-screen bg-app-bg text-app-text selection:bg-cyan-500/30 selection:text-cyan-200 transition-colors duration-300">
+      <ScrollToTop />
+      <Navbar />
+      <main>
+        <Routes>
+          <Route path="/" element={<Home />} />
+          <Route path="/login" element={<Login />} />
+          <Route path="/signup" element={<Signup />} />
+          <Route path="/dashboard" element={<Dashboard />} />
+          <Route path="/schemes" element={<Schemes />} />
+          <Route path="/eligibility" element={<Eligibility />} />
+          <Route path="/assistant" element={<AiAssistantPage />} />
+          <Route path="/about" element={<About />} />
+        </Routes>
+      </main>
+      {!isAssistantPage && <Footer />}
+      <CommandPalette />
+    </div>
+  );
 };
 
 export default function App() {
@@ -59,23 +86,7 @@ export default function App() {
 
   return (
     <Router>
-      <div className="min-h-screen bg-slate-950 dark:bg-slate-950 light:bg-slate-50 text-slate-200 dark:text-slate-200 light:text-slate-800 selection:bg-cyan-500/30 selection:text-cyan-200 transition-colors">
-        <ScrollToTop />
-        <Navbar />
-        <main>
-          <Routes>
-            <Route path="/" element={<Home />} />
-            <Route path="/login" element={<Login />} />
-            <Route path="/signup" element={<Signup />} />
-            <Route path="/dashboard" element={<Dashboard />} />
-            <Route path="/schemes" element={<Schemes />} />
-            <Route path="/eligibility" element={<Eligibility />} />
-            <Route path="/assistant" element={<AiAssistantPage />} />
-          </Routes>
-        </main>
-        <Footer />
-        <CommandPalette />
-      </div>
+      <AppContent />
     </Router>
   );
 }

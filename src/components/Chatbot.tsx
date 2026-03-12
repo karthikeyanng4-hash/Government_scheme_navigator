@@ -1,9 +1,11 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { MessageSquare, Send, User, Bot, Loader2, X, Maximize2, Minimize2 } from 'lucide-react';
+import { Globe, User, Bot, Send, X, MessageSquare, Loader2, Volume2, VolumeX, Mic, MicOff, Sparkles, ArrowRight, ExternalLink, CheckCircle2, Maximize2, Minimize2 } from 'lucide-react';
 import { ChatState, ChatMessage, validateInput } from '../ai/aiAssistant';
 import { getRecommendations } from '../ai/recommendationEngine';
+import { chatWithGemini } from '../ai/GeminiService';
 import translations from '../data/translations.json';
+import { speakText, stopSpeaking } from '../ai/speechUtils';
 
 const Chatbot: React.FC = () => {
   const [isOpen, setIsOpen] = useState(false);
@@ -11,10 +13,13 @@ const Chatbot: React.FC = () => {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [currentState, setCurrentState] = useState<ChatState>(ChatState.START);
   const [input, setInput] = useState('');
+  const [lang, setLang] = useState('en');
+  const [isSpeaking, setIsSpeaking] = useState(false);
+  const [isMuted, setIsMuted] = useState(localStorage.getItem('chatMuted') === 'true');
   const [isTyping, setIsTyping] = useState(false);
   const [userProfile, setUserProfile] = useState<any>({});
-  const [lang, setLang] = useState('en');
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const startedRef = useRef(false);
 
   useEffect(() => {
     const savedLang = localStorage.getItem('appLang') || 'en';
@@ -30,7 +35,8 @@ const Chatbot: React.FC = () => {
   const t = (translations as any)[lang].chatbot;
 
   useEffect(() => {
-    if (isOpen && messages.length === 0) {
+    if (isOpen && !startedRef.current) {
+      startedRef.current = true;
       startChat();
     }
   }, [isOpen]);
@@ -43,6 +49,7 @@ const Chatbot: React.FC = () => {
     setIsTyping(true);
     await new Promise(r => setTimeout(r, 1000));
     setMessages([{ role: 'ai', text: t.greeting }]);
+    await speak(t.greeting);
     setIsTyping(false);
     
     await new Promise(r => setTimeout(r, 500));
@@ -62,10 +69,22 @@ const Chatbot: React.FC = () => {
 
   const addAiMessage = (text: string, options?: string[]) => {
     setIsTyping(true);
-    setTimeout(() => {
+    setTimeout(async () => {
       setMessages(prev => [...prev, { role: 'ai', text, options }]);
+      await speak(text);
       setIsTyping(false);
     }, 1500);
+  };
+
+  const speak = (text: string) => {
+    return speakText(text, lang, isMuted);
+  };
+
+  const toggleMute = () => {
+    const nextMuted = !isMuted;
+    setIsMuted(nextMuted);
+    localStorage.setItem('chatMuted', nextMuted.toString());
+    if (nextMuted) stopSpeaking();
   };
 
   const handleOptionClick = (option: string) => {
@@ -80,8 +99,18 @@ const Chatbot: React.FC = () => {
     setInput('');
 
     const error = validateInput(currentState, messageText);
-    if (error) {
-      addAiMessage(t[error] || error);
+    if (error && currentState !== ChatState.SHOW_RESULTS) {
+      addAiMessage(t.chatbot[error] || error);
+      return;
+    }
+
+    if (currentState === ChatState.SHOW_RESULTS || (error && currentState !== ChatState.START)) {
+      setIsTyping(true);
+      const chatHistory = messages.map(m => ({ role: m.role, content: m.text }));
+      chatHistory.push({ role: 'user', content: messageText });
+      
+      const response = await chatWithGemini(chatHistory);
+      addAiMessage(response);
       return;
     }
 
@@ -194,7 +223,12 @@ const Chatbot: React.FC = () => {
                   </div>
                 </div>
               </div>
-              <div className="flex items-center space-x-2">
+                <button 
+                  onClick={toggleMute}
+                  className={`text-slate-400 hover:text-white transition-colors ${isMuted ? 'text-red-400' : ''}`}
+                >
+                  {isMuted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
+                </button>
                 <button 
                   onClick={() => setIsMinimized(!isMinimized)}
                   className="text-slate-400 hover:text-white transition-colors"
@@ -208,7 +242,6 @@ const Chatbot: React.FC = () => {
                   <X className="w-4 h-4" />
                 </button>
               </div>
-            </div>
 
             {!isMinimized && (
               <>

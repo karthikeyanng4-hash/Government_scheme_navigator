@@ -1,31 +1,43 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
+import { useSearchParams, useNavigate } from 'react-router-dom';
 import { 
   Search, 
-  Filter, 
   ChevronRight, 
   MapPin, 
-  User, 
-  Briefcase, 
-  GraduationCap, 
+  User,
   IndianRupee,
   FileText,
   ExternalLink,
   CheckCircle2,
   X,
   Mic,
-  MicOff
+  MicOff,
+  Volume2,
+  VolumeX,
+  Filter,
+  TrendingUp,
+  Sparkles
 } from 'lucide-react';
 import schemesData from '../data/schemes.json';
 import translations from '../data/translations.json';
+import { speakText, stopSpeaking as globalStopSpeaking } from '../ai/speechUtils';
+
+// Language to TTS mapping is now handled in speechUtils.ts
 
 const Schemes: React.FC = () => {
-  const [searchTerm, setSearchTerm] = useState('');
   const [selectedCategory, setSelectedCategory] = useState('All');
   const [selectedScheme, setSelectedScheme] = useState<any>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
   const [isListening, setIsListening] = useState(false);
+  const [isSpeaking, setIsSpeaking] = useState(false);
   const [filteredSchemes, setFilteredSchemes] = useState(schemesData);
   const [lang, setLang] = useState('en');
+  const [searchTerm, setSearchTerm] = useState('');
+  const [searchParams] = useSearchParams();
+  const navigate = useNavigate();
+  const [isSaved, setIsSaved] = useState(false);
+  const utteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
 
   useEffect(() => {
     const savedLang = localStorage.getItem('appLang') || 'en';
@@ -33,34 +45,148 @@ const Schemes: React.FC = () => {
     
     const handleLangChange = () => {
       setLang(localStorage.getItem('appLang') || 'en');
+      stopSpeaking();
     };
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
+        e.preventDefault();
+        searchInputRef.current?.focus();
+      }
+    };
+
     window.addEventListener('languageChange', handleLangChange);
-    return () => window.removeEventListener('languageChange', handleLangChange);
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      window.removeEventListener('languageChange', handleLangChange);
+      window.removeEventListener('keydown', handleKeyDown);
+    };
   }, []);
 
-  const t = (translations as any)[lang];
+  // Auto-open scheme from ?id= query param (e.g. when redirected from Dashboard)
+  useEffect(() => {
+    const id = searchParams.get('id');
+    if (id) {
+      const scheme = schemesData.find((s: any) => s.id === id);
+      if (scheme) setSelectedScheme(scheme);
+    }
+  }, [searchParams]);
+
+  // Check if current scheme is saved
+  useEffect(() => {
+    if (selectedScheme) {
+      const session = localStorage.getItem('userSession');
+      if (session) {
+        const user = JSON.parse(session);
+        const savedKey = `savedSchemes_${user.email}`;
+        const saved = JSON.parse(localStorage.getItem(savedKey) || '[]');
+        setIsSaved(saved.some((s: any) => s.id === selectedScheme.id));
+      } else {
+        setIsSaved(false);
+      }
+    }
+  }, [selectedScheme]);
+
+  const handleSaveForLater = () => {
+    const session = localStorage.getItem('userSession');
+    if (!session) {
+      alert(lang === 'hi' ? 'योजनाओं को सहेजने के लिए कृपया लॉगिन करें।' : lang === 'ta' ? 'திட்டங்களைச் சேமிக்க தயவுசெய்து உள்நுழையவும்.' : 'Please login to save schemes.');
+      navigate('/login');
+      return;
+    }
+
+    const user = JSON.parse(session);
+    const savedKey = `savedSchemes_${user.email}`;
+    const saved = JSON.parse(localStorage.getItem(savedKey) || '[]');
+
+    if (isSaved) {
+      const updated = saved.filter((s: any) => s.id !== selectedScheme.id);
+      localStorage.setItem(savedKey, JSON.stringify(updated));
+      setIsSaved(false);
+    } else {
+      const newSavedScheme = {
+        ...selectedScheme,
+        status: 'Saved',
+        date: new Date().toISOString().split('T')[0]
+      };
+      const updated = [...saved, newSavedScheme];
+      localStorage.setItem(savedKey, JSON.stringify(updated));
+      setIsSaved(true);
+    }
+    
+    // Alert the user
+    // alert(isSaved ? 'Scheme removed from saved list.' : 'Scheme saved to your dashboard!');
+    window.dispatchEvent(new Event('storage'));
+  };
+
+  const stopSpeaking = useCallback(() => {
+    globalStopSpeaking();
+    setIsSpeaking(false);
+  }, []);
+
+  const speakScheme = useCallback(async (scheme: any) => {
+    stopSpeaking();
+    const text = [
+      scheme.name,
+      scheme.description,
+      `Benefits: ${scheme.benefits}`,
+      `Age: ${scheme.minimum_age} to ${scheme.maximum_age}`,
+      `State: ${scheme.state_availability}`,
+    ].join('. ');
+    
+    setIsSpeaking(true);
+    await speakText(text, lang);
+    setIsSpeaking(false);
+  }, [lang, stopSpeaking]);
+
+  const handleCloseModal = useCallback(() => {
+    stopSpeaking();
+    setSelectedScheme(null);
+  }, [stopSpeaking]);
+
+  const t = (translations as any)[lang] || (translations as any)['en'];
 
   const categories = ['All', ...new Set(schemesData.map(s => s.category))];
 
   useEffect(() => {
-    let filtered = schemesData.filter(scheme => 
+    let filtered = schemesData;
+    
+    // Apply URL Filter (Eligible/Trending)
+    const filterType = searchParams.get('filter');
+    if (filterType === 'eligible') {
+      const results = localStorage.getItem('lastEligibilityResult');
+      if (results) {
+        const eligibleSchemes = JSON.parse(results).recommendations || [];
+        const eligibleIds = eligibleSchemes.map((s: any) => s.id);
+        filtered = filtered.filter(s => eligibleIds.includes(s.id));
+      } else {
+        filtered = []; // No results found
+      }
+    } else if (filterType === 'trending') {
+      // For demonstration, let's say the first 12 schemes are trending
+      // Or we can pick specific ones. Let's just take a slice for now.
+      filtered = filtered.slice(0, 12);
+    }
+
+    // Apply Search and Category Filter
+    filtered = filtered.filter(scheme => 
       (scheme.name.toLowerCase().includes(searchTerm.toLowerCase()) || 
        scheme.description.toLowerCase().includes(searchTerm.toLowerCase())) &&
       (selectedCategory === 'All' || scheme.category === selectedCategory)
     );
     setFilteredSchemes(filtered);
-  }, [searchTerm, selectedCategory]);
+  }, [searchTerm, selectedCategory, searchParams]);
 
   const toggleVoiceSearch = () => {
     if (!('webkitSpeechRecognition' in window)) {
-      alert("Voice search is not supported in this browser.");
+      alert('Voice search is not supported in this browser.');
       return;
     }
 
     const recognition = new (window as any).webkitSpeechRecognition();
     recognition.continuous = false;
     recognition.interimResults = false;
-    recognition.lang = 'en-IN';
+    recognition.lang = lang === 'hi' ? 'hi-IN' : lang === 'ta' ? 'ta-IN' : 'en-IN';
 
     if (isListening) {
       recognition.stop();
@@ -68,20 +194,15 @@ const Schemes: React.FC = () => {
     } else {
       recognition.start();
       setIsListening(true);
-      
+
       recognition.onresult = (event: any) => {
         const transcript = event.results[0][0].transcript;
         setSearchTerm(transcript);
         setIsListening(false);
       };
 
-      recognition.onerror = () => {
-        setIsListening(false);
-      };
-
-      recognition.onend = () => {
-        setIsListening(false);
-      };
+      recognition.onerror = () => setIsListening(false);
+      recognition.onend = () => setIsListening(false);
     }
   };
 
@@ -96,8 +217,9 @@ const Schemes: React.FC = () => {
           <div className="relative flex-1">
             <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-500" />
             <input
+              ref={searchInputRef}
               type="text"
-              placeholder={t.schemes.search_placeholder}
+              placeholder={t.schemes.search_placeholder + " (Ctrl + K)"}
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
               className="w-full bg-slate-900 dark:bg-slate-900 light:bg-white border border-white/10 dark:border-white/10 light:border-slate-200 rounded-2xl py-4 pl-12 pr-12 text-white dark:text-white light:text-slate-900 placeholder-slate-600 focus:outline-none focus:border-cyan-500/50 transition-all shadow-xl"
@@ -113,10 +235,22 @@ const Schemes: React.FC = () => {
           </div>
           
           <div className="flex items-center space-x-2 overflow-x-auto pb-2 md:pb-0 no-scrollbar">
+            {searchParams.get('filter') && (
+              <button
+                onClick={() => navigate('/schemes')}
+                className="px-4 py-2 rounded-full text-xs font-bold whitespace-nowrap transition-all border bg-cyan-500/20 border-cyan-500/50 text-cyan-400 flex items-center space-x-2"
+              >
+                <span>{searchParams.get('filter') === 'eligible' ? t.dashboard.eligible_schemes : t.dashboard.trending}</span>
+                <X className="w-3 h-3" />
+              </button>
+            )}
             {categories.map(cat => (
               <button
                 key={cat}
-                onClick={() => setSelectedCategory(cat)}
+                onClick={() => {
+                  setSelectedCategory(cat);
+                  if (searchParams.get('filter')) navigate('/schemes'); // Clear URL filter when changing category
+                }}
                 className={`px-4 py-2 rounded-full text-xs font-bold whitespace-nowrap transition-all border ${
                   selectedCategory === cat 
                     ? 'bg-cyan-500 border-cyan-500 text-white shadow-[0_0_15px_rgba(6,182,212,0.3)]' 
@@ -138,7 +272,7 @@ const Schemes: React.FC = () => {
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ delay: i * 0.05 }}
-            onClick={() => setSelectedScheme(scheme)}
+            onClick={() => { stopSpeaking(); setSelectedScheme(scheme); }}
             className="bg-slate-900 dark:bg-slate-900 light:bg-white border border-white/5 dark:border-white/5 light:border-slate-200 rounded-3xl p-6 hover:border-cyan-500/30 transition-all group cursor-pointer relative overflow-hidden"
           >
             <div className="absolute top-0 right-0 w-32 h-32 bg-cyan-500/5 -mr-16 -mt-16 rounded-full blur-2xl group-hover:bg-cyan-500/10 transition-all"></div>
@@ -185,7 +319,7 @@ const Schemes: React.FC = () => {
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
-              onClick={() => setSelectedScheme(null)}
+              onClick={handleCloseModal}
               className="absolute inset-0 bg-slate-950/80 backdrop-blur-md"
             />
             
@@ -196,11 +330,24 @@ const Schemes: React.FC = () => {
               className="relative w-full max-w-4xl bg-slate-900 dark:bg-slate-900 light:bg-white border border-white/10 dark:border-white/10 light:border-slate-200 rounded-3xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]"
             >
               <div className="p-6 sm:p-8 overflow-y-auto custom-scrollbar">
+                {/* Close button */}
                 <button 
-                  onClick={() => setSelectedScheme(null)}
+                  onClick={handleCloseModal}
                   className="absolute top-6 right-6 p-2 rounded-full bg-white/5 dark:bg-white/5 light:bg-slate-100 text-slate-400 hover:text-white dark:hover:text-white light:hover:text-slate-900 hover:bg-white/10 transition-all"
                 >
                   <X className="w-5 h-5" />
+                </button>
+                {/* TTS Speak button */}
+                <button
+                  onClick={() => isSpeaking ? stopSpeaking() : speakScheme(selectedScheme)}
+                  title={isSpeaking ? 'Stop speaking' : 'Read aloud'}
+                  className={`absolute top-6 right-16 p-2 rounded-full transition-all ${
+                    isSpeaking
+                      ? 'bg-cyan-500 text-white shadow-[0_0_12px_rgba(6,182,212,0.5)] animate-pulse'
+                      : 'bg-white/5 dark:bg-white/5 light:bg-slate-100 text-slate-400 hover:text-cyan-400 hover:bg-white/10'
+                  }`}
+                >
+                  {isSpeaking ? <VolumeX className="w-5 h-5" /> : <Volume2 className="w-5 h-5" />}
                 </button>
 
                 <div className="mb-8">
@@ -282,8 +429,28 @@ const Schemes: React.FC = () => {
                     <span>{t.schemes.apply_now}</span>
                     <ExternalLink className="w-4 h-4" />
                   </a>
-                  <button className="w-full sm:w-auto px-8 py-4 bg-white/5 dark:bg-white/5 light:bg-slate-100 text-white dark:text-white light:text-slate-900 rounded-2xl font-bold border border-white/10 dark:border-white/10 light:border-slate-200 hover:bg-white/10 transition-all">
-                    {t.schemes.save_later}
+                  <button 
+                    onClick={handleSaveForLater}
+                    className={`w-full sm:w-auto px-8 py-4 rounded-2xl font-bold border transition-all ${
+                      isSaved 
+                        ? 'bg-cyan-500/10 border-cyan-500/50 text-cyan-400'
+                        : 'bg-white/5 dark:bg-white/5 light:bg-slate-100 text-white dark:text-white light:text-slate-900 border border-white/10 dark:border-white/10 light:border-slate-200 hover:bg-white/10'
+                    }`}
+                  >
+                    {isSaved 
+                      ? (lang === 'hi' ? 'सहेजा गया' : lang === 'ta' ? 'சேமிக்கப்பட்டது' : 'Saved') 
+                      : t.schemes.save_later}
+                  </button>
+                  <button
+                    onClick={() => isSpeaking ? stopSpeaking() : speakScheme(selectedScheme)}
+                    className={`w-full sm:w-auto px-8 py-4 rounded-2xl font-bold border transition-all flex items-center justify-center space-x-2 ${
+                      isSpeaking
+                        ? 'bg-cyan-500/20 border-cyan-500/50 text-cyan-300'
+                        : 'bg-white/5 dark:bg-white/5 light:bg-slate-100 border-white/10 dark:border-white/10 light:border-slate-200 text-slate-300 hover:border-cyan-500/40 hover:text-cyan-400'
+                    }`}
+                  >
+                    {isSpeaking ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
+                    <span>{isSpeaking ? 'Stop' : (lang === 'hi' ? 'सुनें' : lang === 'ta' ? 'கேளுங்கள்' : 'Listen')}</span>
                   </button>
                 </div>
               </div>

@@ -21,11 +21,12 @@ import {
   Calendar as CalendarIcon,
   Heart
 } from 'lucide-react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import translations from '../data/translations.json';
 import { calculateAge } from '../ai/eligibilityEngine';
 
 const Dashboard: React.FC = () => {
+  const navigate = useNavigate();
   const [user, setUser] = useState<any>(null);
   const [eligibilityResult, setEligibilityResult] = useState<any>(null);
   const [savedSchemes, setSavedSchemes] = useState<any[]>([]);
@@ -56,20 +57,37 @@ const Dashboard: React.FC = () => {
       }
     };
 
-    loadResults();
-    window.addEventListener('eligibilityUpdated', loadResults);
-    
-    // Mock saved schemes
-    setSavedSchemes([
-      { id: 'PMJDY', name: 'Pradhan Mantri Jan Dhan Yojana', status: 'Applied', date: '2026-02-15' },
-      { id: 'PMJJBY', name: 'Pradhan Mantri Jeevan Jyoti Bima Yojana', status: 'In Review', date: '2026-03-01' }
-    ]);
+    const loadSavedSchemes = () => {
+      const session = localStorage.getItem('userSession');
+      if (session) {
+        const userData = JSON.parse(session);
+        const savedKey = `savedSchemes_${userData.email}`;
+        const saved = JSON.parse(localStorage.getItem(savedKey) || '[]');
+        setSavedSchemes(saved);
+      }
+    };
 
+    loadResults();
+    loadSavedSchemes();
+    window.addEventListener('eligibilityUpdated', loadResults);
+    window.addEventListener('storage', loadSavedSchemes);
+    
     return () => {
       window.removeEventListener('eligibilityUpdated', loadResults);
       window.removeEventListener('languageChange', handleLangChange);
+      window.removeEventListener('storage', loadSavedSchemes);
     };
   }, []);
+
+  const handleUnsave = (schemeId: string) => {
+    if (!user) return;
+    const savedKey = `savedSchemes_${user.email}`;
+    const saved = JSON.parse(localStorage.getItem(savedKey) || '[]');
+    const updated = saved.filter((s: any) => s.id !== schemeId);
+    localStorage.setItem(savedKey, JSON.stringify(updated));
+    setSavedSchemes(updated);
+    window.dispatchEvent(new Event('storage'));
+  };
 
   const handleUpdateProfile = (e: React.FormEvent) => {
     e.preventDefault();
@@ -101,11 +119,22 @@ const Dashboard: React.FC = () => {
   }
 
   const stats = [
-    { label: t.dashboard.total_schemes, value: "50", icon: Search, color: "text-blue-400" },
-    { label: t.dashboard.eligible_schemes, value: eligibilityResult?.recommendations?.length || "0", icon: FileCheck, color: "text-emerald-400" },
-    { label: t.dashboard.saved_schemes, value: savedSchemes.length.toString(), icon: Star, color: "text-amber-400" },
-    { label: t.dashboard.trending, value: "12", icon: TrendingUp, color: "text-purple-400" }
+    { label: t.dashboard.total_schemes, value: "50", icon: Search, color: "text-blue-400", filter: null },
+    { label: t.dashboard.eligible_schemes, value: eligibilityResult?.recommendations?.length || "0", icon: FileCheck, color: "text-emerald-400", filter: 'eligible' },
+    { label: t.dashboard.saved_schemes, value: savedSchemes.length.toString(), icon: Star, color: "text-amber-400", scroll: 'saved-schemes' },
+    { label: t.dashboard.trending, value: "12", icon: TrendingUp, color: "text-purple-400", filter: 'trending' }
   ];
+
+  const handleStatClick = (stat: any) => {
+    if (stat.filter) {
+      navigate(`/schemes?filter=${stat.filter}`);
+    } else if (stat.scroll) {
+      const el = document.getElementById(stat.scroll);
+      if (el) el.scrollIntoView({ behavior: 'smooth' });
+    } else {
+      navigate('/schemes');
+    }
+  };
 
   const handleOpenEdit = () => {
     setEditForm({ ...user });
@@ -205,7 +234,8 @@ const Dashboard: React.FC = () => {
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ delay: i * 0.1 }}
-            className="bg-slate-900 dark:bg-slate-900 light:bg-white border border-white/5 dark:border-white/5 light:border-slate-200 p-6 rounded-3xl relative overflow-hidden group transition-colors"
+            className="bg-slate-900 dark:bg-slate-900 light:bg-white border border-white/5 dark:border-white/5 light:border-slate-200 p-6 rounded-3xl relative overflow-hidden group transition-colors cursor-pointer hover:border-cyan-500/50"
+            onClick={() => handleStatClick(stat)}
           >
             <div className="absolute top-0 right-0 w-24 h-24 bg-white/5 dark:bg-white/5 light:bg-slate-100 -mr-8 -mt-8 rounded-full group-hover:scale-110 transition-transform"></div>
             <stat.icon className={`w-6 h-6 ${stat.color} mb-4`} />
@@ -355,24 +385,49 @@ const Dashboard: React.FC = () => {
 
         {/* Sidebar */}
         <div className="space-y-8">
-          {/* Saved Applications */}
-          <section>
-            <h3 className="text-lg font-bold text-white dark:text-white light:text-slate-900 mb-6">{t.dashboard.recent_applications}</h3>
+          {/* Saved Schemes */}
+          <section id="saved-schemes">
+            <h3 className="text-lg font-bold text-white dark:text-white light:text-slate-900 mb-6 flex items-center space-x-2">
+              <Star className="w-5 h-5 text-amber-400" />
+              <span>{t.dashboard.saved_schemes}</span>
+            </h3>
             <div className="space-y-4">
-              {savedSchemes.map((app, i) => (
-                <div key={i} className="bg-slate-900 dark:bg-slate-900 light:bg-white border border-white/5 dark:border-white/5 light:border-slate-200 p-4 rounded-2xl flex items-center justify-between transition-colors">
-                  <div>
-                    <div className="text-sm font-bold text-white dark:text-white light:text-slate-900 mb-1">{app.name}</div>
+              {savedSchemes.length > 0 ? (
+                savedSchemes.map((app, i) => (
+                  <div key={i} className="bg-slate-900 dark:bg-slate-900 light:bg-white border border-white/5 dark:border-white/5 light:border-slate-200 p-4 rounded-2xl flex items-center justify-between transition-colors group">
+                    <div className="flex-1">
+                      <div className="text-sm font-bold text-white dark:text-white light:text-slate-900 mb-1 group-hover:text-cyan-400 transition-colors">{app.name}</div>
+                      <div className="flex items-center space-x-2">
+                        <span className={`w-2 h-2 rounded-full ${app.status === 'Applied' ? 'bg-emerald-500' : 'bg-cyan-500'}`}></span>
+                        <span className="text-[10px] text-slate-500 uppercase tracking-wider font-bold">
+                          {app.status === 'Applied' ? t.dashboard.applied : (app.status === 'Saved' ? (lang === 'hi' ? 'सहेजा गया' : lang === 'ta' ? 'சேமிக்கப்பட்டது' : 'Saved') : t.dashboard.in_review)} • {app.date}
+                        </span>
+                      </div>
+                    </div>
                     <div className="flex items-center space-x-2">
-                      <span className={`w-2 h-2 rounded-full ${app.status === 'Applied' ? 'bg-emerald-500' : 'bg-amber-500'}`}></span>
-                      <span className="text-[10px] text-slate-500 uppercase tracking-wider font-bold">{app.status === 'Applied' ? t.dashboard.applied : t.dashboard.in_review} • {app.date}</span>
+                      <Link 
+                        to={`/schemes?id=${app.id}`}
+                        className="p-2 text-slate-500 hover:text-cyan-400 transition-colors"
+                        title="View Details"
+                      >
+                        <ExternalLink className="w-4 h-4" />
+                      </Link>
+                      <button 
+                        onClick={() => handleUnsave(app.id)}
+                        className="p-2 text-slate-500 hover:text-red-400 transition-colors"
+                        title="Remove"
+                      >
+                        <X className="w-4 h-4" />
+                      </button>
                     </div>
                   </div>
-                  <button className="p-2 text-slate-500 hover:text-white transition-colors">
-                    <ExternalLink className="w-4 h-4" />
-                  </button>
+                ))
+              ) : (
+                <div className="text-center py-10 bg-slate-900/50 rounded-2xl border border-dashed border-white/10">
+                  <Star className="w-8 h-8 text-slate-700 mx-auto mb-2" />
+                  <p className="text-slate-500 text-xs">No saved schemes yet.</p>
                 </div>
-              ))}
+              )}
             </div>
           </section>
         </div>

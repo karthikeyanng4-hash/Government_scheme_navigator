@@ -13,6 +13,11 @@ const Login: React.FC = () => {
   const navigate = useNavigate();
 
   useEffect(() => {
+    const session = localStorage.getItem('userSession');
+    if (session) {
+      navigate('/dashboard');
+    }
+
     const savedLang = localStorage.getItem('appLang') || 'en';
     setLang(savedLang);
     
@@ -21,7 +26,7 @@ const Login: React.FC = () => {
     };
     window.addEventListener('languageChange', handleLangChange);
     return () => window.removeEventListener('languageChange', handleLangChange);
-  }, []);
+  }, [navigate]);
 
   const t = (translations as any)[lang];
 

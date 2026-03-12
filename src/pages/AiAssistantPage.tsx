@@ -20,7 +20,9 @@ import {
 } from 'lucide-react';
 import { ChatState, ChatMessage, validateInput } from '../ai/aiAssistant';
 import { getRecommendations } from '../ai/recommendationEngine';
+import { chatWithGemini } from '../ai/GeminiService';
 import translations from '../data/translations.json';
+import { speakText, stopSpeaking, setSpeechEnabled } from '../ai/speechUtils';
 
 const AiAssistantPage: React.FC = () => {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -31,26 +33,50 @@ const AiAssistantPage: React.FC = () => {
   const [lang, setLang] = useState('en');
   const [isListening, setIsListening] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
-  const [recommendations, setRecommendations] = useState<any[]>([]);
   const [applyingScheme, setApplyingScheme] = useState<any>(null);
   const [showApplicationForm, setShowApplicationForm] = useState(false);
+  const [currentStep, setCurrentStep] = useState(1);
+  const [isMuted, setIsMuted] = useState(localStorage.getItem('chatMuted') === 'true');
+  const [recommendations, setRecommendations] = useState<any[]>([]);
   
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const chatContainerRef = useRef<HTMLDivElement>(null);
+  const startedRef = useRef(false);
 
   useEffect(() => {
+    // Enable speech when assistant page is active
+    setSpeechEnabled(true);
+    
     const savedLang = localStorage.getItem('appLang') || 'en';
     setLang(savedLang);
     
     const handleLangChange = () => {
-      setLang(localStorage.getItem('appLang') || 'en');
+      const newLang = localStorage.getItem('appLang') || 'en';
+      setLang(newLang);
     };
     window.addEventListener('languageChange', handleLangChange);
     
-    startChat();
+    if (!startedRef.current) {
+      startedRef.current = true;
+      startChat();
+    }
     
-    return () => window.removeEventListener('languageChange', handleLangChange);
+    return () => {
+      window.removeEventListener('languageChange', handleLangChange);
+      // Disable speech when leaving assistant page
+      setSpeechEnabled(false);
+    };
   }, []);
+
+  // Sync messages with language changes
+  useEffect(() => {
+    if (messages.length > 0) {
+      // For a real app, we might re-translate history via an API.
+      // For now, we update the UI strings since we use translations[lang] in render for some parts,
+      // but the 'text' in message state is already processed.
+      // We can only realistically re-process the LAST AI message if it matches a key.
+    }
+  }, [lang]);
 
   useEffect(() => {
     if (messagesEndRef.current) {
@@ -66,7 +92,7 @@ const AiAssistantPage: React.FC = () => {
     await new Promise(r => setTimeout(r, 1000));
     const greeting = t.chatbot.greeting;
     setMessages([{ role: 'ai', text: greeting }]);
-    speak(greeting);
+    await speak(greeting);
     setIsTyping(false);
     
     await new Promise(r => setTimeout(r, 500));
@@ -86,21 +112,22 @@ const AiAssistantPage: React.FC = () => {
 
   const addAiMessage = (text: string, options?: string[]) => {
     setIsTyping(true);
-    setTimeout(() => {
+    setTimeout(async () => {
       setMessages(prev => [...prev, { role: 'ai', text, options }]);
-      speak(text);
+      await speak(text);
       setIsTyping(false);
     }, 1500);
   };
 
   const speak = (text: string) => {
-    if (!('speechSynthesis' in window)) return;
-    window.speechSynthesis.cancel();
-    const utterance = new SpeechSynthesisUtterance(text);
-    utterance.lang = lang === 'hi' ? 'hi-IN' : lang === 'ta' ? 'ta-IN' : 'en-IN';
-    utterance.onstart = () => setIsSpeaking(true);
-    utterance.onend = () => setIsSpeaking(false);
-    window.speechSynthesis.speak(utterance);
+    return speakText(text, lang, isMuted);
+  };
+
+  const toggleMute = () => {
+    const nextMuted = !isMuted;
+    setIsMuted(nextMuted);
+    localStorage.setItem('chatMuted', nextMuted.toString());
+    if (nextMuted) stopSpeaking();
   };
 
   const toggleVoiceInput = () => {
@@ -145,8 +172,19 @@ const AiAssistantPage: React.FC = () => {
     }
 
     const error = validateInput(currentState, messageText);
-    if (error) {
+    if (error && currentState !== ChatState.SHOW_RESULTS) {
       addAiMessage(t.chatbot[error] || error);
+      return;
+    }
+
+    if (currentState === ChatState.SHOW_RESULTS || (error && currentState !== ChatState.START)) {
+      setIsTyping(true);
+      const chatHistory = messages.map(m => ({ role: m.role, content: m.text }));
+      // Add the current message to history for the API call
+      chatHistory.push({ role: 'user', content: messageText });
+      
+      const response = await chatWithGemini(chatHistory);
+      addAiMessage(response);
       return;
     }
 
@@ -235,6 +273,7 @@ const AiAssistantPage: React.FC = () => {
   const handleApplyNow = (scheme: any) => {
     setApplyingScheme(scheme);
     setShowApplicationForm(true);
+    setCurrentStep(1);
     const msg = (t.chatbot.apply_help || '').replace('{name}', scheme.name);
     addAiMessage(msg);
   };
@@ -243,6 +282,98 @@ const AiAssistantPage: React.FC = () => {
     setShowApplicationForm(false);
     setApplyingScheme(null);
     addAiMessage("No problem. I've brought back the list of eligible schemes for you.");
+  };
+
+  const handleNextStep = () => {
+    if (currentStep < 4) {
+      setCurrentStep(prev => prev + 1);
+      const stepMessages = [
+        "",
+        "Great! Now please fill in some basic details required for the application.",
+        "Almost done. Please review and confirm the declarations before submission.",
+        "Your application has been submitted successfully! We'll notify you once it's processed."
+      ];
+      if (stepMessages[currentStep]) {
+        addAiMessage(stepMessages[currentStep]);
+      }
+    }
+  };
+
+  const renderApplicationStep = () => {
+    switch (currentStep) {
+      case 1:
+        return (
+          <div className="space-y-6">
+            <div className="flex items-center space-x-3 mb-4">
+              <div className="w-10 h-10 rounded-xl bg-cyan-500/10 flex items-center justify-center">
+                <FileText className="w-5 h-5 text-cyan-400" />
+              </div>
+              <h3 className="text-lg font-bold text-white dark:text-white light:text-slate-900">Document Checklist</h3>
+            </div>
+            
+            <div className="space-y-3">
+              {applyingScheme.documents_required.map((doc: string, i: number) => (
+                <div key={i} className="flex items-center space-x-3 p-3 bg-white/5 dark:bg-white/5 light:bg-slate-50 rounded-xl border border-white/5 dark:border-white/5 light:border-slate-200">
+                  <div className="w-5 h-5 rounded border border-white/20 dark:border-white/20 light:border-slate-300 flex items-center justify-center">
+                    <CheckCircle2 className="w-3 h-3 text-emerald-500" />
+                  </div>
+                  <span className="text-sm text-slate-300 dark:text-slate-300 light:text-slate-700">{doc}</span>
+                </div>
+              ))}
+            </div>
+
+            <div className="pt-6 border-t border-white/5 dark:border-white/5 light:border-slate-200">
+              <h4 className="text-sm font-bold text-white dark:text-white light:text-slate-900 mb-4">Verify Identity</h4>
+              <div className="p-4 bg-emerald-500/10 border border-emerald-500/20 rounded-2xl flex items-center space-x-4">
+                <ShieldCheck className="w-8 h-8 text-emerald-400" />
+                <div>
+                  <div className="text-xs font-bold text-emerald-400 uppercase tracking-wider">Aadhaar Verified</div>
+                  <div className="text-[10px] text-emerald-400/70">Your identity has been auto-verified via your profile.</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      case 2:
+        return (
+          <div className="space-y-6">
+            <h3 className="text-lg font-bold text-white">Application Form</h3>
+            <div className="space-y-4">
+              <div>
+                <label className="text-xs text-slate-400 block mb-1">Full Name</label>
+                <input type="text" defaultValue={userProfile.fullName || userProfile.name} className="w-full bg-slate-800 border border-white/10 rounded-xl p-3 text-white text-sm" />
+              </div>
+              <div>
+                <label className="text-xs text-slate-400 block mb-1">Mobile Number</label>
+                <input type="text" placeholder="Enter mobile number" className="w-full bg-slate-800 border border-white/10 rounded-xl p-3 text-white text-sm" />
+              </div>
+            </div>
+          </div>
+        );
+      case 3:
+        return (
+          <div className="space-y-6">
+            <h3 className="text-lg font-bold text-white">Certify & Submit</h3>
+            <div className="p-4 bg-white/5 rounded-2xl border border-white/10">
+              <p className="text-xs text-slate-400 leading-relaxed">
+                I hereby declare that the information provided is true to the best of my knowledge. I understand that any false information may lead to rejection of the application.
+              </p>
+            </div>
+          </div>
+        );
+      case 4:
+        return (
+          <div className="py-12 text-center">
+            <div className="w-20 h-20 bg-emerald-500/20 rounded-full flex items-center justify-center mx-auto mb-6">
+              <CheckCircle2 className="w-10 h-10 text-emerald-500" />
+            </div>
+            <h3 className="text-xl font-bold text-white mb-2">Submitted!</h3>
+            <p className="text-sm text-slate-400">Application ID: GOV-{Math.floor(100000 + Math.random() * 900000)}</p>
+          </div>
+        );
+      default:
+        return null;
+    }
   };
 
   return (
@@ -264,10 +395,12 @@ const AiAssistantPage: React.FC = () => {
           </div>
           <div className="flex items-center space-x-2">
             <button 
-              onClick={() => window.speechSynthesis.cancel()}
-              className="p-2 rounded-xl bg-white/5 dark:bg-white/5 light:bg-slate-100 text-slate-400 hover:text-white dark:hover:text-white light:hover:text-slate-900 transition-all"
+              onClick={toggleMute}
+              className={`p-2 rounded-xl transition-all ${
+                isMuted ? 'bg-red-500/10 text-red-400' : 'bg-white/5 text-slate-400 hover:text-white'
+              }`}
             >
-              {isSpeaking ? <Volume2 className="w-5 h-5 text-cyan-400" /> : <VolumeX className="w-5 h-5" />}
+              {isMuted ? <VolumeX className="w-5 h-5" /> : <Volume2 className="w-5 h-5" />}
             </button>
           </div>
         </div>
@@ -462,50 +595,31 @@ const AiAssistantPage: React.FC = () => {
                 <div className="bg-slate-900 dark:bg-slate-900 light:bg-white border border-white/5 dark:border-white/5 light:border-slate-200 rounded-2xl p-4 transition-colors">
                   <div className="flex items-center justify-between mb-2">
                     <span className="text-[10px] text-slate-500 dark:text-slate-500 light:text-slate-400 uppercase tracking-widest font-bold">Application Progress</span>
-                    <span className="text-xs text-cyan-400 font-bold">Step 1 of 4</span>
+                    <span className="text-xs text-cyan-400 font-bold">Step {currentStep} of 4</span>
                   </div>
                   <div className="w-full h-1.5 bg-slate-800 dark:bg-slate-800 light:bg-slate-100 rounded-full overflow-hidden">
-                    <div className="w-1/4 h-full bg-cyan-500 shadow-[0_0_10px_rgba(6,182,212,0.5)]"></div>
+                    <div 
+                      className="h-full bg-cyan-500 shadow-[0_0_10px_rgba(6,182,212,0.5)] transition-all duration-500"
+                      style={{ width: `${(currentStep / 4) * 100}%` }}
+                    ></div>
                   </div>
                 </div>
 
                 {/* Application Form Simulation */}
                 <div className="bg-slate-900 dark:bg-slate-900 light:bg-white border border-white/5 dark:border-white/5 light:border-slate-200 rounded-3xl p-8 space-y-6 transition-colors">
-                  <div className="flex items-center space-x-3 mb-4">
-                    <div className="w-10 h-10 rounded-xl bg-cyan-500/10 flex items-center justify-center">
-                      <FileText className="w-5 h-5 text-cyan-400" />
-                    </div>
-                    <h3 className="text-lg font-bold text-white dark:text-white light:text-slate-900">Document Checklist</h3>
-                  </div>
-                  
-                  <div className="space-y-3">
-                    {applyingScheme.documents_required.map((doc: string, i: number) => (
-                      <div key={i} className="flex items-center space-x-3 p-3 bg-white/5 dark:bg-white/5 light:bg-slate-50 rounded-xl border border-white/5 dark:border-white/5 light:border-slate-200">
-                        <div className="w-5 h-5 rounded border border-white/20 dark:border-white/20 light:border-slate-300 flex items-center justify-center">
-                          <CheckCircle2 className="w-3 h-3 text-emerald-500 opacity-0" />
-                        </div>
-                        <span className="text-sm text-slate-300 dark:text-slate-300 light:text-slate-700">{doc}</span>
-                      </div>
-                    ))}
-                  </div>
+                  {renderApplicationStep()}
 
-                  <div className="pt-6 border-t border-white/5 dark:border-white/5 light:border-slate-200">
-                    <h4 className="text-sm font-bold text-white dark:text-white light:text-slate-900 mb-4">Verify Identity</h4>
-                    <div className="p-4 bg-emerald-500/10 border border-emerald-500/20 rounded-2xl flex items-center space-x-4">
-                      <ShieldCheck className="w-8 h-8 text-emerald-400" />
-                      <div>
-                        <div className="text-xs font-bold text-emerald-400 uppercase tracking-wider">Aadhaar Verified</div>
-                        <div className="text-[10px] text-emerald-400/70">Your identity has been auto-verified via your profile.</div>
-                      </div>
+                  {currentStep < 4 && (
+                    <div className="pt-6">
+                      <button 
+                        onClick={handleNextStep}
+                        className="w-full py-4 bg-cyan-500 text-white rounded-2xl font-bold hover:bg-cyan-400 transition-all shadow-lg flex items-center justify-center space-x-2"
+                      >
+                        <span>{currentStep === 3 ? 'Finalize & Submit' : 'Proceed to Next Step'}</span>
+                        <ArrowRight className="w-4 h-4" />
+                      </button>
                     </div>
-                  </div>
-
-                  <div className="pt-6">
-                    <button className="w-full py-4 bg-cyan-500 text-white rounded-2xl font-bold hover:bg-cyan-400 transition-all shadow-lg flex items-center justify-center space-x-2">
-                      <span>Proceed to Next Step</span>
-                      <ArrowRight className="w-4 h-4" />
-                    </button>
-                  </div>
+                  )}
                 </div>
 
                 {/* AI Help Card */}
@@ -516,7 +630,10 @@ const AiAssistantPage: React.FC = () => {
                   <div>
                     <h4 className="text-sm font-bold text-white dark:text-white light:text-slate-900 mb-1">AI Assistant Tip</h4>
                     <p className="text-xs text-slate-400 dark:text-slate-400 light:text-slate-500 leading-relaxed">
-                      Make sure your mobile number is linked to your Aadhaar for OTP verification in the next step. If you need help, just ask me!
+                      {currentStep === 1 && "Make sure your mobile number is linked to your Aadhaar for OTP verification in the next step. If you need help, just ask me!"}
+                      {currentStep === 2 && "We've pre-filled some information from your profile. Please check if everything is correct."}
+                      {currentStep === 3 && "This is the final step. Once submitted, you can track your application status in the dashboard."}
+                      {currentStep === 4 && "Congratulations! Your application is now with the respective department. You can close this window or ask me about other schemes."}
                     </p>
                   </div>
                 </div>
